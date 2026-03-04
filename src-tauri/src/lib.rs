@@ -2430,6 +2430,58 @@ fn hash_notification_id(seed: &str) -> i32 {
 //   On macOS the App Nap hack (NSProcessInfo.beginActivityWithOptions) prevents
 //   the OS from freezing the async timer when the window is hidden.
 
+/// Schedule all briefing notifications across briefing times × day offsets.
+/// Returns number of notifications scheduled.
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn schedule_all_briefings(
+    app: &AppHandle,
+    briefing_times: &[Value],
+    items: &[Value],
+    today_str: &str,
+    tomorrow_str: &str,
+    now: chrono::DateTime<chrono::Local>,
+    horizon: chrono::DateTime<chrono::Local>,
+    max: i32,
+) -> i32 {
+    let mut count = 0i32;
+    for bt in briefing_times {
+        let time_str = match bt.as_str() {
+            Some(s) if s.len() >= 5 => s,
+            _ => continue,
+        };
+        for day_offset in 0..=1i64 {
+            if count >= max { return count; }
+            if let Some(sc) = schedule_briefing_aot(
+                app, time_str, day_offset, items, today_str, tomorrow_str, now, horizon,
+            ) {
+                count += sc;
+            }
+        }
+    }
+    count
+}
+
+/// Schedule all per-item reminder notifications.
+/// Returns number of notifications scheduled.
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn schedule_all_reminders(
+    app: &AppHandle,
+    items: &[Value],
+    now: chrono::DateTime<chrono::Local>,
+    horizon: chrono::DateTime<chrono::Local>,
+    already: i32,
+    max: i32,
+) -> i32 {
+    let mut count = already;
+    for item in items {
+        if count >= max { break; }
+        if let Some(sc) = schedule_reminder_aot(app, item, now, horizon) {
+            count += sc;
+        }
+    }
+    count - already
+}
+
 // ── MOBILE: Native AOT scheduling ─────────────────────────────────────────
 #[cfg(any(target_os = "android", target_os = "ios"))]
 fn sync_notifications(app: &AppHandle, data_dir: &std::path::Path) {
@@ -2456,34 +2508,16 @@ fn sync_notifications(app: &AppHandle, data_dir: &std::path::Path) {
     let tomorrow_str = (now + chrono::Duration::days(1)).format("%Y-%m-%d").to_string();
     const MAX_SCHEDULED: i32 = 60;
     let horizon = now + chrono::Duration::days(14);
-    let mut scheduled_count: i32 = 0;
 
-    // Schedule briefings
-    for bt in &briefing_times {
-        if scheduled_count >= MAX_SCHEDULED { break; }
-        let time_str = match bt.as_str() {
-            Some(s) if s.len() >= 5 => s,
-            _ => continue,
-        };
-        for day_offset in 0..=1i64 {
-            if scheduled_count >= MAX_SCHEDULED { break; }
-            if let Some(sc) = schedule_briefing_aot(
-                app, time_str, day_offset, &items, &today_str, &tomorrow_str, now, horizon,
-            ) {
-                scheduled_count += sc;
-            }
-        }
-    }
+    let briefing_count = schedule_all_briefings(
+        app, &briefing_times, &items, &today_str, &tomorrow_str, now, horizon, MAX_SCHEDULED,
+    );
+    let reminder_count = schedule_all_reminders(
+        app, &items, now, horizon, briefing_count, MAX_SCHEDULED,
+    );
+    let total = briefing_count + reminder_count;
 
-    // Schedule per-item reminders
-    for item in &items {
-        if scheduled_count >= MAX_SCHEDULED { break; }
-        if let Some(sc) = schedule_reminder_aot(app, item, now, horizon) {
-            scheduled_count += sc;
-        }
-    }
-
-    eprintln!("[LexFlow Sync] ══ Mobile AOT sync: {}/{} notifications scheduled ══", scheduled_count, MAX_SCHEDULED);
+    eprintln!("[LexFlow Sync] ══ Mobile AOT sync: {}/{} notifications scheduled ══", total, MAX_SCHEDULED);
 }
 
 /// Convert chrono::DateTime<Local> to time::OffsetDateTime (for notification scheduling).
@@ -2832,27 +2866,42 @@ fn autolock_loop(ah: AppHandle) {
     }
 }
 
+/// Copy all files from one directory to another, skipping existing files.
+fn copy_dir_non_overwrite(src: &std::path::Path, dest_dir: &std::path::Path) {
+    let entries = match fs::read_dir(src) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let dest = dest_dir.join(entry.file_name());
+        if !dest.exists() { let _ = fs::copy(entry.path(), &dest); }
+    }
+}
+
+/// Copy security files from one directory to another, skipping existing files.
+fn copy_security_files_if_missing(src_dir: &std::path::Path, dest_dir: &std::path::Path) {
+    for sec_file in &[LICENSE_FILE, LICENSE_SENTINEL_FILE, BURNED_KEYS_FILE, LOCKOUT_FILE] {
+        let old_path = src_dir.join(sec_file);
+        let new_path = dest_dir.join(sec_file);
+        if old_path.exists() && !new_path.exists() { let _ = fs::copy(&old_path, &new_path); }
+    }
+}
+
 /// Migrate data from old identifier (com.technojaw.lexflow) to new one.
 #[cfg(not(target_os = "android"))]
 fn migrate_old_identifier(data_dir: &std::path::Path, security_dir: &std::path::Path) {
-    if let Some(old_data_dir) = dirs::data_dir() {
-        let old_base = old_data_dir.join("com.technojaw.lexflow");
-        if !old_base.exists() || !old_base.is_dir() { return; }
-        let old_vault = old_base.join("lexflow-vault");
-        if old_vault.exists() && !data_dir.join(VAULT_FILE).exists() {
-            if let Ok(entries) = fs::read_dir(&old_vault) {
-                for entry in entries.flatten() {
-                    let dest = data_dir.join(entry.file_name());
-                    if !dest.exists() { let _ = fs::copy(entry.path(), &dest); }
-                }
-            }
-        }
-        for sec_file in &[LICENSE_FILE, LICENSE_SENTINEL_FILE, BURNED_KEYS_FILE, LOCKOUT_FILE] {
-            let old_path = old_base.join(sec_file);
-            let new_path = security_dir.join(sec_file);
-            if old_path.exists() && !new_path.exists() { let _ = fs::copy(&old_path, &new_path); }
-        }
+    let old_data_dir = match dirs::data_dir() {
+        Some(d) => d,
+        None => return,
+    };
+    let old_base = old_data_dir.join("com.technojaw.lexflow");
+    if !old_base.exists() || !old_base.is_dir() { return; }
+
+    let old_vault = old_base.join("lexflow-vault");
+    if old_vault.exists() && !data_dir.join(VAULT_FILE).exists() {
+        copy_dir_non_overwrite(&old_vault, data_dir);
     }
+    copy_security_files_if_missing(&old_base, security_dir);
 }
 
 /// Migrate security files from vault dir to security_dir (post v2.6.1).
