@@ -1,19 +1,172 @@
-name: Build
+# LexFlow Backend -- Rust Security Audit & SonarCloud Analysis
+name: Rust Audit & SonarCloud
+
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   pull_request:
     types: [opened, synchronize, reopened]
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
 jobs:
-  sonarqube:
-    name: SonarQube
-    runs-on: macos-latest
+  # ─────────────────────────────────────────────────────────
+  # 1. Rust Quality Gate -- clippy, fmt, check, audit
+  # ─────────────────────────────────────────────────────────
+  rust-quality:
+    name: "Rust: Clippy + Fmt + Audit"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - name: Harden Runner
+        uses: step-security/harden-runner@a90bcbc6539c36a85cdfeb73f7e2f433735f215b
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
-      - name: SonarQube Scan
-        uses: SonarSource/sonarqube-scan-action@v6
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6
+        with:
+          workspaces: ./src-tauri -> target
+          shared-key: rust-audit
+
+      - name: cargo check
+        working-directory: src-tauri
+        run: cargo check --release 2>&1
+
+      - name: cargo fmt -- check
+        working-directory: src-tauri
+        run: cargo fmt --check 2>&1
+
+      - name: cargo clippy (strict)
+        working-directory: src-tauri
+        run: cargo clippy --release -- -D warnings 2>&1
+
+      - name: cargo clippy (JSON for SonarCloud)
+        working-directory: src-tauri
+        run: |
+          cargo clippy --release --message-format=json 2>&1 | tee clippy-raw.json || true
+
+      - name: Convert Clippy JSON to SonarCloud Generic Issue Format
+        working-directory: src-tauri
+        run: |
+          python3 - <<'PYEOF'
+          import json, sys
+
+          issues = []
+          seen = set()
+          with open("clippy-raw.json") as f:
+              for line in f:
+                  line = line.strip()
+                  if not line:
+                      continue
+                  try:
+                      msg = json.loads(line)
+                  except json.JSONDecodeError:
+                      continue
+                  if msg.get("reason") != "compiler-message":
+                      continue
+                  m = msg.get("message", {})
+                  level = m.get("level", "")
+                  if level not in ("warning", "error"):
+                      continue
+                  code = m.get("code", {})
+                  code_str = code.get("code", "unknown") if code else "unknown"
+                  text = m.get("message", "")
+                  spans = m.get("spans", [])
+                  if not spans:
+                      continue
+                  primary = next((s for s in spans if s.get("is_primary")), spans[0])
+                  filename = primary.get("file_name", "")
+                  if filename.startswith("/") or "registry" in filename:
+                      continue
+                  # Make path relative to repo root (prepend src-tauri/)
+                  filepath = f"src-tauri/{filename}"
+                  line_num = primary.get("line_start", 1)
+                  severity = "CRITICAL" if level == "error" else "MAJOR"
+                  dedup_key = f"{filepath}:{line_num}:{code_str}"
+                  if dedup_key in seen:
+                      continue
+                  seen.add(dedup_key)
+                  issues.append({
+                      "engineId": "cargo-clippy",
+                      "ruleId": code_str,
+                      "severity": severity,
+                      "type": "CODE_SMELL" if level == "warning" else "BUG",
+                      "primaryLocation": {
+                          "message": text,
+                          "filePath": filepath,
+                          "textRange": {"startLine": line_num}
+                      }
+                  })
+
+          with open("../clippy-sonar.json", "w") as out:
+              json.dump({"issues": issues}, out, indent=2)
+          print(f"Converted {len(issues)} Clippy issues to SonarCloud format")
+          PYEOF
+
+      - name: cargo audit
+        run: |
+          cargo install cargo-audit --quiet 2>/dev/null || true
+          cargo audit --file src-tauri/Cargo.lock 2>&1 || echo "cargo audit: vulnerabilities found (non-blocking)"
+
+      - name: Upload Clippy report as artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: clippy-sonar-report
+          path: clippy-sonar.json
+          retention-days: 7
+
+  # ─────────────────────────────────────────────────────────
+  # 2. SonarCloud Scan -- reads Clippy report as external issues
+  # ─────────────────────────────────────────────────────────
+  sonarcloud:
+    name: "SonarCloud Analysis"
+    needs: rust-quality
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@a90bcbc6539c36a85cdfeb73f7e2f433735f215b
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+
+      - name: Download Clippy report
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: clippy-sonar-report
+
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarqube-scan-action@0303d6b62e310685c4fe437d40acfb2f2a5c5192 # v6
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
