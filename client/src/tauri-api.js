@@ -33,6 +33,7 @@ export const importVault = (pwd) => safeInvoke('import_vault', { pwd });
 export const changePassword = (currentPassword, newPassword) =>
   safeInvoke('change_password', { currentPassword, newPassword });
 export const verifyVaultPassword = (pwd) => safeInvoke('verify_vault_password', { pwd });
+export const getAuditLog = () => safeInvoke('get_audit_log');
 
 // Biometrics
 export const checkBio = () => safeInvoke('check_bio');
@@ -41,7 +42,14 @@ export const saveBio = (pwd) => safeInvoke('save_bio', { pwd });
 export const clearBio = () => safeInvoke('clear_bio');
 // SECURITY FIX (Gemini Audit Chunk 01): wrap in try/catch so callers
 // get null on bio failure instead of an unhandled throw from safeInvoke
+// FOCUS GUARD: never trigger system biometric prompt when LexFlow window
+// doesn't have focus — prevents Touch ID appearing over other apps
 export const bioLogin = async () => {
+  // If the window is not focused, skip biometric entirely
+  if (!document.hasFocus()) {
+    console.debug('[LexFlow] bioLogin skipped — window not focused');
+    return null;
+  }
   try {
     const res = await safeInvoke('bio_login');
     return (res?.success) ? { success: true } : null;
@@ -105,11 +113,13 @@ export const sendNotification = ({ title, body }) =>
   safeInvoke('send_notification', { title, body });
 export const syncNotificationSchedule = (schedule) =>
   safeInvoke('sync_notification_schedule', { schedule });
+export const testNotification = () => safeInvoke('test_notification');
 
 // Licensing
 export const checkLicense = () => safeInvoke('check_license');
-export const activateLicense = (key, clientName) =>
-  safeInvoke('activate_license', { key, _clientName: clientName || null });
+export const verifyLicense = () => safeInvoke('verify_license');
+export const activateLicense = (key) => safeInvoke('activate_license', { key });
+export const getMachineFingerprint = () => safeInvoke('get_machine_fingerprint');
 
 // Platform / App
 export const isMac = () => safeInvoke('is_mac');
@@ -120,6 +130,7 @@ export const getPlatform = () => safeInvoke('get_platform');
 export const windowMinimize = () => safeInvoke('window_minimize');
 export const windowMaximize = () => safeInvoke('window_maximize');
 export const windowClose = () => safeInvoke('window_close');
+export const showMainWindow = () => safeInvoke('show_main_window');
 
 // Security & Content Protection
 export const setContentProtection = (enabled) =>
@@ -144,6 +155,13 @@ export const onVaultLocked = (cb) => {
 };
 export const onVaultWarning = (cb) => {
   const p = listen('lf-vault-warning', () => cb()).catch(() => null);
+  return () => { p.then(fn => fn?.()); };
+};
+// SECURITY FIX (Audit 2026-03-04): listen for backend settings-corrupted event.
+// Fired when get_settings() detects a corrupted settings file and falls back to {}.
+// payload: { backup_path: string, timestamp: string }
+export const onSettingsCorrupted = (cb) => {
+  const p = listen('settings-corrupted', (e) => cb(e.payload)).catch(() => null);
   return () => { p.then(fn => fn?.()); };
 };
 

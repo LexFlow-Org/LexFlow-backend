@@ -1,0 +1,899 @@
+import { useState, useCallback, useEffect } from 'react';
+import PropTypes from 'prop-types';
+import { 
+  Shield, 
+  Lock, 
+  HardDrive, 
+  LogOut,
+  RefreshCw,
+  Bell,
+  Camera,
+  Timer,
+  Upload,
+  Download,
+  Smartphone,
+  Monitor,
+  ArrowLeftRight,
+  KeyRound,
+  Eye,
+  EyeOff,
+  X,
+  Fingerprint
+} from 'lucide-react';
+import toast from 'react-hot-toast';
+import LicenseSettings from '../components/LicenseSettings';
+import ModalOverlay from '../components/ModalOverlay';
+import * as api from '../tauri-api';
+
+const PREAVVISO_OPTIONS = [
+  { value: 0, label: 'Al momento' },
+  { value: 15, label: '15 min' },
+  { value: 30, label: '30 min' },
+  { value: 60, label: '1 ora' },
+  { value: 120, label: '2 ore' },
+  { value: 1440, label: '1 giorno' },
+];
+
+const AUTOLOCK_OPTIONS = [
+  { value: 1, label: '1 min' },
+  { value: 2, label: '2 min' },
+  { value: 5, label: '5 min' },
+  { value: 10, label: '10 min' },
+  { value: 15, label: '15 min' },
+  { value: 30, label: '30 min' },
+  { value: 0, label: 'Mai' },
+];
+
+/* ── Factory Reset Modal ── */
+function FactoryResetModal({ onClose }) {
+  const [pwd, setPwd] = useState('');
+  const [error, setError] = useState('');
+  const [showPwd, setShowPwd] = useState(false);
+
+  const doReset = async () => {
+    if (!pwd) { setError('Password richiesta.'); return; }
+    // Extra security: trigger system biometric before factory reset
+    try {
+      const bioAvail = await api.checkBio();
+      if (bioAvail) {
+        const bioResult = await api.bioLogin();
+        if (!bioResult) {
+          setError('Verifica biometrica fallita. Factory reset negato.');
+          return;
+        }
+      }
+    } catch { /* bio unavailable — proceed with password only */ }
+    const res = await api.resetVault(pwd);
+    if (res?.success) { onClose(); globalThis.location.reload(); }
+    else { setError(res?.error || 'Password errata.'); }
+  };
+
+  return (
+    <ModalOverlay onClose={onClose} labelledBy="factory-reset-title" zIndex={200}>
+      <div className="bg-[#0f1016] border border-white/10 rounded-[32px] max-w-md w-full shadow-2xl overflow-hidden">
+        <div className="px-8 pt-8 pb-5" style={{ background: 'linear-gradient(135deg, rgba(239,68,68,0.08) 0%, rgba(239,68,68,0.02) 100%)' }}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-4">
+              <div className="w-12 h-12 bg-red-500/10 rounded-2xl flex items-center justify-center border border-red-500/20">
+                <LogOut size={22} className="text-red-400" />
+              </div>
+              <div>
+                <h3 id="factory-reset-title" className="text-xl font-bold text-white">Factory Reset</h3>
+                <p className="text-xs text-text-dim mt-0.5">Tutti i dati verranno eliminati</p>
+              </div>
+            </div>
+            <button onClick={onClose} className="p-2 hover:bg-white/10 rounded-xl text-text-dim transition-all group">
+              <X size={20} className="group-hover:rotate-90 transition-transform" />
+            </button>
+          </div>
+        </div>
+        <div className="px-8 py-6 space-y-4">
+          <p className="text-text-muted text-xs leading-relaxed">
+            Stai per cancellare <span className="text-white font-bold">tutti i dati del Vault</span>.
+            Inserisci la password per confermare. <span className="font-semibold">Azione irreversibile.</span>
+          </p>
+          <div className="relative">
+            <KeyRound size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-dim" />
+            <input
+              type={showPwd ? 'text' : 'password'}
+              className="w-full py-3 pl-10 pr-10 rounded-xl bg-white/5 border border-white/10 text-white placeholder:text-white/20 text-sm focus:border-primary/40 outline-none transition-colors"
+              placeholder="Password vault…"
+              value={pwd}
+              onChange={e => { setPwd(e.target.value); setError(''); }}
+              autoFocus
+              onKeyDown={async (e) => { if (e.key === 'Enter' && pwd) doReset(); }}
+            />
+            <button type="button" onClick={() => setShowPwd(v => !v)}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-text-dim hover:text-white transition-colors">
+              {showPwd ? <EyeOff size={16} /> : <Eye size={16} />}
+            </button>
+          </div>
+          {error && <p className="text-red-400 text-[11px] font-semibold">{error}</p>}
+        </div>
+        <div className="flex justify-end gap-3 px-8 py-5 bg-[#14151d] border-t border-white/5">
+          <button onClick={onClose} className="px-6 py-3 rounded-2xl text-text-dim hover:text-white hover:bg-white/5 transition-all text-xs font-bold uppercase tracking-widest">Annulla</button>
+          <button onClick={doReset} className="px-6 py-3 rounded-2xl bg-red-500/10 border border-red-500/20 text-red-400 hover:bg-red-500/20 transition-all text-xs font-bold uppercase tracking-widest">Conferma Reset</button>
+        </div>
+      </div>
+    </ModalOverlay>
+  );
+}
+
+FactoryResetModal.propTypes = { onClose: PropTypes.func.isRequired };
+
+/* ── Export Backup Modal ── */
+function ExportBackupModal({ onClose }) {
+  const [pwd, setPwd] = useState('');
+  const [pwdConfirm, setPwdConfirm] = useState('');
+  const [showPwd, setShowPwd] = useState(false);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const doExport = async () => {
+    setError('');
+    if (!pwd) { setError('Inserisci una password per il backup.'); return; }
+    if (pwd.length < 8) { setError('Password troppo corta (min. 8 caratteri).'); return; }
+    if (pwd !== pwdConfirm) { setError('Le password non corrispondono.'); return; }
+    if (!api.exportVault) { toast.error('Servizio backup non disponibile'); return; }
+    setLoading(true);
+    const toastId = toast.loading('Generazione backup…');
+    try {
+      const result = await api.exportVault(pwd);
+      if (result?.cancelled) { toast.dismiss(toastId); return; }
+      if (result?.success) {
+        toast.success('Backup esportato con successo!', { id: toastId });
+        onClose();
+        return;
+      }
+      toast.error('Errore: ' + (result?.error || 'Sconosciuto'), { id: toastId });
+    } catch {
+      toast.error('Errore critico durante il backup', { id: toastId });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <ModalOverlay onClose={onClose} labelledBy="export-backup-title" zIndex={200}>
+      <div className="bg-[#0f1016] border border-white/10 rounded-[32px] max-w-md w-full shadow-2xl overflow-hidden">
+        <div className="px-8 pt-8 pb-5" style={{ background: 'linear-gradient(135deg, rgba(212,169,64,0.08) 0%, rgba(212,169,64,0.02) 100%)' }}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-4">
+              <div className="w-12 h-12 bg-primary/10 rounded-2xl flex items-center justify-center border border-primary/20">
+                <Download size={22} className="text-primary" />
+              </div>
+              <div>
+                <h3 id="export-backup-title" className="text-xl font-bold text-white">Esporta Backup</h3>
+                <p className="text-xs text-text-dim mt-0.5">Crea un file .lex cifrato</p>
+              </div>
+            </div>
+            <button onClick={onClose} className="p-2 hover:bg-white/10 rounded-xl text-text-dim transition-all group">
+              <X size={20} className="group-hover:rotate-90 transition-transform" />
+            </button>
+          </div>
+        </div>
+        <div className="px-8 py-6 space-y-4">
+          <p className="text-text-muted text-xs leading-relaxed">
+            Scegli una password per proteggere il file di backup. Ti servirà per importarlo su un altro dispositivo.
+          </p>
+          <div className="space-y-3">
+            <div className="relative">
+              <KeyRound size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-dim" />
+              <input type={showPwd ? 'text' : 'password'}
+                className="w-full py-3 pl-10 pr-10 rounded-xl bg-white/5 border border-white/10 text-white placeholder:text-white/20 text-sm focus:border-primary/40 outline-none transition-colors"
+                placeholder="Password backup…"
+                value={pwd}
+                onChange={e => { setPwd(e.target.value); setError(''); }}
+                autoFocus />
+              <button type="button" onClick={() => setShowPwd(v => !v)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-text-dim hover:text-white transition-colors">
+                {showPwd ? <EyeOff size={16} /> : <Eye size={16} />}
+              </button>
+            </div>
+            <div className="relative">
+              <KeyRound size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-dim" />
+              <input type={showPwd ? 'text' : 'password'}
+                className="w-full py-3 pl-10 rounded-xl bg-white/5 border border-white/10 text-white placeholder:text-white/20 text-sm focus:border-primary/40 outline-none transition-colors"
+                placeholder="Conferma password…"
+                value={pwdConfirm}
+                onChange={e => { setPwdConfirm(e.target.value); setError(''); }}
+                onKeyDown={e => { if (e.key === 'Enter') doExport(); }} />
+            </div>
+          </div>
+          {error && <p className="text-red-400 text-[11px] font-semibold">{error}</p>}
+        </div>
+        <div className="flex justify-end gap-3 px-8 py-5 bg-[#14151d] border-t border-white/5">
+          <button onClick={onClose} className="px-6 py-3 rounded-2xl text-text-dim hover:text-white hover:bg-white/5 transition-all text-xs font-bold uppercase tracking-widest">Annulla</button>
+          <button onClick={doExport} disabled={loading}
+            className={`btn-primary px-6 py-3 text-xs font-bold uppercase tracking-widest ${loading ? 'opacity-50' : ''}`}>
+            {loading ? 'Esporto…' : 'Esporta'}
+          </button>
+        </div>
+      </div>
+    </ModalOverlay>
+  );
+}
+
+ExportBackupModal.propTypes = { onClose: PropTypes.func.isRequired };
+
+/* ── Import Backup Modal ── */
+function ImportBackupModal({ onClose }) {
+  const [pwd, setPwd] = useState('');
+  const [showPwd, setShowPwd] = useState(false);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const doImport = async () => {
+    setError('');
+    if (!pwd) { setError('Inserisci la password del backup.'); return; }
+    if (!api.importVault) { toast.error('Servizio importazione non disponibile'); return; }
+    setLoading(true);
+    const toastId = toast.loading('Importazione in corso…');
+    try {
+      const result = await api.importVault(pwd);
+      if (result?.cancelled) { toast.dismiss(toastId); return; }
+      if (result?.success) {
+        toast.success('Vault importato! Ricarico…', { id: toastId });
+        onClose();
+        setTimeout(() => globalThis.location.reload(), 1500);
+        return;
+      }
+      toast.error('Errore: ' + (result?.error || 'Password errata o file non valido'), { id: toastId });
+    } catch {
+      toast.error("Errore critico durante l'importazione", { id: toastId });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <ModalOverlay onClose={onClose} labelledBy="import-backup-title" zIndex={200}>
+      <div className="bg-[#0f1016] border border-white/10 rounded-[32px] max-w-md w-full shadow-2xl overflow-hidden">
+        <div className="px-8 pt-8 pb-5" style={{ background: 'linear-gradient(135deg, rgba(212,169,64,0.08) 0%, rgba(212,169,64,0.02) 100%)' }}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-4">
+              <div className="w-12 h-12 bg-primary/10 rounded-2xl flex items-center justify-center border border-primary/20">
+                <Upload size={22} className="text-primary" />
+              </div>
+              <div>
+                <h3 id="import-backup-title" className="text-xl font-bold text-white">Importa Backup</h3>
+                <p className="text-xs text-text-dim mt-0.5">Sovrascrive i dati attuali</p>
+              </div>
+            </div>
+            <button onClick={onClose} className="p-2 hover:bg-white/10 rounded-xl text-text-dim transition-all group">
+              <X size={20} className="group-hover:rotate-90 transition-transform" />
+            </button>
+          </div>
+        </div>
+        <div className="px-8 py-6 space-y-4">
+          <p className="text-text-muted text-xs leading-relaxed">
+            Inserisci la password con cui è stato cifrato il file di backup.
+            {' '}<span className="text-white font-semibold">I dati attuali verranno sovrascritti.</span>
+          </p>
+          <div className="relative">
+            <KeyRound size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-dim" />
+            <input type={showPwd ? 'text' : 'password'}
+              className="w-full py-3 pl-10 pr-10 rounded-xl bg-white/5 border border-white/10 text-white placeholder:text-white/20 text-sm focus:border-primary/40 outline-none transition-colors"
+              placeholder="Password backup…"
+              value={pwd}
+              onChange={e => { setPwd(e.target.value); setError(''); }}
+              autoFocus
+              onKeyDown={e => { if (e.key === 'Enter') doImport(); }} />
+            <button type="button" onClick={() => setShowPwd(v => !v)}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-text-dim hover:text-white transition-colors">
+              {showPwd ? <EyeOff size={16} /> : <Eye size={16} />}
+            </button>
+          </div>
+          {error && <p className="text-red-400 text-[11px] font-semibold">{error}</p>}
+        </div>
+        <div className="flex justify-end gap-3 px-8 py-5 bg-[#14151d] border-t border-white/5">
+          <button onClick={onClose} className="px-6 py-3 rounded-2xl text-text-dim hover:text-white hover:bg-white/5 transition-all text-xs font-bold uppercase tracking-widest">Annulla</button>
+          <button onClick={doImport} disabled={loading}
+            className={`btn-primary px-6 py-3 text-xs font-bold uppercase tracking-widest ${loading ? 'opacity-50' : ''}`}>
+            {loading ? 'Importo…' : 'Importa'}
+          </button>
+        </div>
+      </div>
+    </ModalOverlay>
+  );
+}
+
+ImportBackupModal.propTypes = { onClose: PropTypes.func.isRequired };
+
+/* ── Biometric Reset Confirm Modal ── */
+function BioResetConfirmModal({ onClose }) {
+  // step: 'verify' → 'confirm' → 'done' → 're-enroll'
+  const [step, setStep] = useState('verify');
+  const [pwd, setPwd] = useState('');
+  const [showPwd, setShowPwd] = useState(false);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  // On mount, trigger system biometric to verify identity
+  useEffect(() => {
+    if (step !== 'verify') return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const bioAvail = await api.checkBio();
+        if (!bioAvail) { if (!cancelled) setStep('confirm'); return; }
+        const result = await api.bioLogin();
+        if (cancelled) return;
+        if (result) { setStep('confirm'); }
+        else { toast.error('Autenticazione biometrica fallita'); onClose(); }
+      } catch {
+        if (!cancelled) { setStep('confirm'); } // fallback to confirm if bio fails
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only on mount
+  }, []);
+
+  const doReset = async () => {
+    setLoading(true);
+    try {
+      await api.clearBio();
+      toast.success("Biometria resettata");
+      setStep('done');
+    } catch {
+      toast.error("Errore nel reset biometria");
+    }
+    setLoading(false);
+  };
+
+  const doReEnroll = async () => {
+    setError('');
+    if (!pwd.trim()) { setError('Inserisci la Master Password.'); return; }
+    setLoading(true);
+    try {
+      // Trigger system biometric first for extra security
+      try {
+        const bioAvail = await api.checkBio();
+        if (bioAvail) {
+          const bioResult = await api.bioLogin();
+          if (!bioResult) {
+            setError('Verifica biometrica fallita. Riprova.');
+            setLoading(false);
+            return;
+          }
+        }
+      } catch { /* bio unavailable — proceed with password only */ }
+      // Verify the password is correct
+      const verify = await api.verifyVaultPassword(pwd);
+      if (!verify?.valid) {
+        setError(verify?.error || 'Password errata.');
+        setLoading(false);
+        return;
+      }
+      // Enroll biometrics with the password
+      await api.saveBio(pwd);
+      toast.success("Biometria riconfigurata con successo!");
+      onClose();
+    } catch {
+      setError('Errore nella configurazione biometrica.');
+    }
+    setLoading(false);
+  };
+
+  return (
+    <ModalOverlay onClose={onClose} labelledBy="bio-reset-title" zIndex={200}>
+      <div className="bg-[#0f1016] border border-white/10 rounded-[32px] max-w-md w-full shadow-2xl overflow-hidden">
+        <div className="px-8 pt-8 pb-5" style={{ background: step === 're-enroll' 
+          ? 'linear-gradient(135deg, rgba(212,169,64,0.08) 0%, rgba(212,169,64,0.02) 100%)'
+          : step === 'verify'
+            ? 'linear-gradient(135deg, rgba(96,165,250,0.08) 0%, rgba(96,165,250,0.02) 100%)'
+            : 'linear-gradient(135deg, rgba(239,68,68,0.08) 0%, rgba(239,68,68,0.02) 100%)' }}>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <div className={`w-12 h-12 rounded-2xl flex items-center justify-center border ${
+              step === 'verify' ? 'bg-blue-500/10 border-blue-500/20' :
+              step === 're-enroll' ? 'bg-primary/10 border-primary/20' : 'bg-red-500/10 border-red-500/20'
+            }`}>
+              {step === 'verify' 
+                ? <Fingerprint size={22} className="text-blue-400 animate-pulse" />
+                : <RefreshCw size={22} className={step === 're-enroll' ? 'text-primary' : 'text-red-400'} />
+              }
+            </div>
+            <div>
+              <h3 id="bio-reset-title" className="text-xl font-bold text-white">
+                {step === 'verify' && 'Verifica Identità'}
+                {step === 'confirm' && 'Resetta Biometria'}
+                {step === 'done' && 'Biometria Resettata'}
+                {step === 're-enroll' && 'Riconfigura Biometria'}
+              </h3>
+              <p className="text-xs text-text-dim mt-0.5">
+                {step === 'verify' && 'Conferma con biometria del dispositivo…'}
+                {step === 'confirm' && 'Identità verificata'}
+                {step === 'done' && 'Vuoi riconfigurare subito?'}
+                {step === 're-enroll' && 'Password + biometria del dispositivo'}
+              </p>
+            </div>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-white/10 rounded-xl text-text-dim transition-all group">
+            <X size={20} className="group-hover:rotate-90 transition-transform" />
+          </button>
+        </div>
+      </div>
+
+      {/* Step: Verifying identity */}
+      {step === 'verify' && (
+        <div className="px-8 py-10 flex flex-col items-center gap-4">
+          <div className="w-16 h-16 rounded-2xl bg-blue-500/10 flex items-center justify-center border border-blue-500/20 animate-pulse">
+            <Fingerprint size={32} className="text-blue-400" />
+          </div>
+          <p className="text-text-muted text-xs text-center">Conferma la tua identità con Touch ID / Face ID…</p>
+        </div>
+      )}
+
+      {/* Step: Confirm reset */}
+      {step === 'confirm' && (
+        <>
+          <div className="px-8 py-6">
+            <p className="text-text-muted text-xs leading-relaxed">
+              Cancellare le credenziali biometriche salvate? Dovrai reinserire la password e potrai riconfigurare la biometria.
+            </p>
+          </div>
+          <div className="flex justify-end gap-3 px-8 py-5 bg-[#14151d] border-t border-white/5">
+            <button onClick={onClose} className="px-6 py-3 rounded-2xl text-text-dim hover:text-white hover:bg-white/5 transition-all text-xs font-bold uppercase tracking-widest">Annulla</button>
+            <button onClick={doReset} disabled={loading}
+              className={`px-6 py-3 rounded-2xl bg-red-500/10 border border-red-500/20 text-red-400 hover:bg-red-500/20 transition-all text-xs font-bold uppercase tracking-widest ${loading ? 'opacity-50' : ''}`}>
+              {loading ? 'Reset...' : 'Conferma'}
+            </button>
+          </div>
+        </>
+      )}
+
+      {/* Step: Done — offer re-enrollment */}
+      {step === 'done' && (
+        <>
+          <div className="px-8 py-6">
+            <p className="text-text-muted text-xs leading-relaxed">
+              Le credenziali biometriche sono state cancellate. Vuoi riconfigurare subito l'accesso biometrico (Face ID / Touch ID)?
+            </p>
+          </div>
+          <div className="flex justify-end gap-3 px-8 py-5 bg-[#14151d] border-t border-white/5">
+            <button onClick={onClose} className="px-6 py-3 rounded-2xl text-text-dim hover:text-white hover:bg-white/5 transition-all text-xs font-bold uppercase tracking-widest">No, chiudi</button>
+            <button onClick={() => setStep('re-enroll')}
+              className="btn-primary px-6 py-3 text-xs font-bold uppercase tracking-widest">
+              Riconfigura
+            </button>
+          </div>
+        </>
+      )}
+
+      {/* Step: Re-enroll — ask for password */}
+      {step === 're-enroll' && (
+        <>
+          <div className="px-8 py-6 space-y-4">
+            <p className="text-text-muted text-xs leading-relaxed">
+              Inserisci la tua Master Password per configurare l'accesso biometrico.
+            </p>
+            <div className="relative">
+              <KeyRound size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-dim" />
+              <input type={showPwd ? 'text' : 'password'}
+                className="w-full py-3 pl-10 pr-10 rounded-xl bg-white/5 border border-white/10 text-white placeholder:text-white/20 text-sm focus:border-primary/40 outline-none transition-colors"
+                placeholder="Master Password…"
+                value={pwd}
+                onChange={e => { setPwd(e.target.value); setError(''); }}
+                autoFocus
+                onKeyDown={e => { if (e.key === 'Enter') doReEnroll(); }} />
+              <button type="button" onClick={() => setShowPwd(v => !v)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-text-dim hover:text-white transition-colors">
+                {showPwd ? <EyeOff size={16} /> : <Eye size={16} />}
+              </button>
+            </div>
+            {error && <p className="text-red-400 text-[11px] font-semibold">{error}</p>}
+          </div>
+          <div className="flex justify-end gap-3 px-8 py-5 bg-[#14151d] border-t border-white/5">
+            <button onClick={onClose} className="px-6 py-3 rounded-2xl text-text-dim hover:text-white hover:bg-white/5 transition-all text-xs font-bold uppercase tracking-widest">Annulla</button>
+            <button onClick={doReEnroll} disabled={loading}
+              className={`btn-primary px-6 py-3 text-xs font-bold uppercase tracking-widest ${loading ? 'opacity-50' : ''}`}>
+              {loading ? 'Configurazione...' : 'Salva Biometria'}
+            </button>
+          </div>
+        </>
+      )}
+      </div>
+    </ModalOverlay>
+  );
+}
+
+BioResetConfirmModal.propTypes = { onClose: PropTypes.func.isRequired };
+
+export default function SettingsPage({ onLock }) {
+  const [privacyEnabled, setPrivacyEnabled] = useState(true);
+  const [appVersion, setAppVersion] = useState('');
+  const [platform, setPlatform] = useState('');
+
+  // Stato per le Notifiche
+  const [notifyEnabled, setNotifyEnabled] = useState(true);
+  const [notificationTime, setNotificationTime] = useState(30);
+
+  // Stato per Sicurezza Avanzata
+  const [screenshotProtection, setScreenshotProtection] = useState(true);
+  const [autolockMinutes, setAutolockMinutes] = useState(5);
+  
+  // Modal visibility flags
+  const [showFactoryReset, setShowFactoryReset] = useState(false);
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [showBioResetConfirm, setShowBioResetConfirm] = useState(false);
+
+  // Biometrics status: 'checking' | 'active' | 'available' | 'unavailable'
+  const [bioStatus, setBioStatus] = useState('checking');
+  const refreshBioStatus = async () => {
+    try {
+      const available = await api.checkBio();
+      if (!available) { setBioStatus('unavailable'); return; }
+      const saved = await api.hasBioSaved();
+      setBioStatus(saved ? 'active' : 'available');
+    } catch { setBioStatus('unavailable'); }
+  };
+
+  const applySettings = (settings) => {
+    if (!settings) return;
+    if (typeof settings.privacyBlurEnabled === 'boolean') setPrivacyEnabled(settings.privacyBlurEnabled);
+    if (typeof settings.notifyEnabled === 'boolean') setNotifyEnabled(settings.notifyEnabled);
+    if (settings.notificationTime) setNotificationTime(settings.notificationTime);
+    if (typeof settings.screenshotProtection === 'boolean') setScreenshotProtection(settings.screenshotProtection);
+    if (settings.autolockMinutes !== undefined) setAutolockMinutes(settings.autolockMinutes);
+  };
+
+  useEffect(() => {
+    api.getAppVersion().then(setAppVersion);
+    api.getPlatform().then(p => {
+      const labels = { macos: 'macOS', windows: 'Windows', android: 'Android', ios: 'iOS', linux: 'Linux' };
+      setPlatform(labels[p] || p || 'Desktop');
+    }).catch(() => api.isMac().then(m => setPlatform(m ? 'macOS' : 'Windows')));
+    api.getSettings().then(applySettings);
+    // Check biometrics status
+    api.checkBio().then(available => {
+      if (!available) { setBioStatus('unavailable'); return; }
+      api.hasBioSaved().then(saved => setBioStatus(saved ? 'active' : 'available'));
+    }).catch(() => setBioStatus('unavailable'));
+    // Listen for corrupted settings file event from backend
+    const unsubscribe = api.onSettingsCorrupted?.((payload) => {
+      toast.error(
+        `⚠️ Il file impostazioni era corrotto ed è stato ripristinato ai valori predefiniti. Backup salvato in: ${payload?.backup_path || '(sconosciuto)'}`,
+        { duration: 8000 }
+      );
+    });
+    return () => { unsubscribe?.(); };
+  }, []);
+
+  const buildFullSettings = useCallback(() => ({
+    privacyBlurEnabled: privacyEnabled,
+    notifyEnabled,
+    notificationTime,
+    screenshotProtection,
+    autolockMinutes,
+  }), [privacyEnabled, notifyEnabled, notificationTime, screenshotProtection, autolockMinutes]);
+
+  const handlePrivacyToggle = async () => {
+    const newValue = !privacyEnabled;
+    setPrivacyEnabled(newValue);
+    try {
+      await api.saveSettings({ ...buildFullSettings(), privacyBlurEnabled: newValue });
+      toast.success(newValue ? 'Privacy Blur Attivato' : 'Privacy Blur Disattivato');
+    } catch {
+      toast.error('Errore salvataggio');
+      setPrivacyEnabled(!newValue); 
+    }
+  };
+
+  // Funzione per salvare le impostazioni delle notifiche
+  const saveNotifySettings = async (updates) => {
+    try {
+      await api.saveSettings({ ...buildFullSettings(), ...updates });
+      toast.success("Preferenze notifiche aggiornate");
+    } catch {
+      toast.error("Errore nel salvataggio");
+    }
+  };
+
+  return (
+    <div className="max-w-4xl mx-auto space-y-8 pb-10">
+      
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-3xl font-bold text-white tracking-tight mb-2">Impostazioni</h1>
+          <p className="text-text-muted text-sm">Gestisci sicurezza e preferenze di LexFlow.</p>
+        </div>
+        <div className="px-4 py-2 bg-white/5 rounded-lg border border-white/10 text-xs font-mono text-text-dim">
+          v{appVersion} • {platform}
+        </div>
+      </div>
+
+      <div className="grid gap-6">
+        
+        {/* SEZIONE NOTIFICHE (AGGIUNTA) */}
+        <section className="glass-card p-6 space-y-6">
+          <div className="flex items-center gap-3 border-b border-white/5 pb-4 mb-4">
+            <Bell className="text-primary" size={20} />
+            <h2 className="text-lg font-bold text-white">Notifiche di Sistema</h2>
+          </div>
+
+          <div className="flex flex-col gap-6">
+            <div className="flex items-center justify-between">
+              <div className="space-y-1">
+                <span className="font-medium text-white">Avvisi Agenda e Scadenze</span>
+                <p className="text-xs text-text-muted max-w-md">
+                  Ricevi notifiche desktop per udienze, scadenze e impegni in agenda.
+                </p>
+              </div>
+              <button 
+                onClick={() => {
+                  const val = !notifyEnabled;
+                  setNotifyEnabled(val);
+                  saveNotifySettings({ notifyEnabled: val });
+                }}
+                className={`w-12 h-6 rounded-full transition-colors relative ${notifyEnabled ? 'bg-primary' : 'bg-white/10'}`}
+              >
+                <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform ${notifyEnabled ? 'left-7' : 'left-1'}`} />
+              </button>
+            </div>
+
+            {notifyEnabled && (
+              <div className="pt-4 border-t border-white/5">
+                <span className="text-[10px] font-bold text-text-dim uppercase tracking-wider mb-3 block">Preavviso Standard</span>
+                <div className="flex flex-wrap gap-2">
+                  {PREAVVISO_OPTIONS.map(opt => (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      onClick={() => {
+                        setNotificationTime(opt.value);
+                        saveNotifySettings({ notificationTime: opt.value });
+                      }}
+                      className={`px-4 py-2 rounded-xl text-xs font-semibold transition-all border ${
+                        notificationTime === opt.value
+                          ? 'bg-primary text-black border-primary shadow-[0_0_12px_rgba(212,169,64,0.3)]'
+                          : 'bg-white/[0.04] text-text-muted border-white/5 hover:bg-white/[0.08] hover:text-white'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </section>
+
+        {/* Sezione Sicurezza */}
+        <section className="glass-card p-6 space-y-6">
+          <div className="flex items-center gap-3 border-b border-white/5 pb-4 mb-4">
+            <Shield className="text-primary" size={20} />
+            <h2 className="text-lg font-bold text-white">Sicurezza & Privacy</h2>
+          </div>
+
+          <div className="flex items-center justify-between group">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <span className="font-medium text-white">Privacy Blur</span>
+                <span className="text-[10px] bg-primary/20 text-primary px-2 py-0.5 rounded border border-primary/20">CONSIGLIATO</span>
+              </div>
+              <p className="text-xs text-text-muted max-w-md">
+                Sfoca automaticamente il contenuto dell'app quando perdi il focus.
+              </p>
+            </div>
+            <button 
+              onClick={handlePrivacyToggle}
+              className={`w-12 h-6 rounded-full transition-colors relative ${privacyEnabled ? 'bg-primary' : 'bg-white/10'}`}
+            >
+              <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform duration-200 ${privacyEnabled ? 'left-7' : 'left-1'}`} />
+            </button>
+          </div>
+
+          {/* Anti-Screenshot */}
+          <div className="flex items-center justify-between group pt-4 border-t border-white/5">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <Camera size={16} className="text-primary" />
+                <span className="font-medium text-white">Blocco Screenshot</span>
+                <span className="text-[10px] bg-primary/10 text-primary px-2 py-0.5 rounded border border-primary/20">SICUREZZA</span>
+              </div>
+              <p className="text-xs text-text-muted max-w-md">
+                Impedisce la cattura dello schermo (screenshot, registrazioni, condivisione schermo).
+              </p>
+            </div>
+            <button 
+              onClick={async () => {
+                const val = !screenshotProtection;
+                setScreenshotProtection(val);
+                try {
+                  await api.setContentProtection(val);
+                  await api.saveSettings({ ...buildFullSettings(), screenshotProtection: val });
+                  toast.success(val ? 'Blocco Screenshot Attivato' : 'Blocco Screenshot Disattivato');
+                } catch {
+                  toast.error('Errore');
+                  setScreenshotProtection(!val);
+                }
+              }}
+              className={`w-12 h-6 rounded-full transition-colors relative ${screenshotProtection ? 'bg-primary' : 'bg-white/10'}`}
+            >
+              <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform duration-200 ${screenshotProtection ? 'left-7' : 'left-1'}`} />
+            </button>
+          </div>
+
+          {/* Auto-Lock Timer */}
+          <div className="pt-4 border-t border-white/5">
+            <div className="flex items-center gap-2 mb-1">
+              <Timer size={16} className="text-primary" />
+              <span className="font-medium text-white">Blocco Automatico</span>
+            </div>
+            <p className="text-xs text-text-muted max-w-md mb-4">
+              Blocca automaticamente il Vault dopo un periodo di inattività.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {AUTOLOCK_OPTIONS.map(opt => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={async () => {
+                    setAutolockMinutes(opt.value);
+                    try {
+                      await api.setAutolockMinutes(opt.value);
+                      await api.saveSettings({ ...buildFullSettings(), autolockMinutes: opt.value });
+                      toast.success(opt.value === 0 ? 'Blocco automatico disabilitato' : `Blocco dopo ${opt.label} di inattività`);
+                    } catch {
+                      toast.error('Errore');
+                    }
+                  }}
+                  className={`px-4 py-2 rounded-xl text-xs font-semibold transition-all border ${
+                    autolockMinutes === opt.value
+                      ? 'bg-primary text-black border-primary shadow-[0_0_12px_rgba(212,169,64,0.3)]'
+                      : 'bg-white/[0.04] text-text-muted border-white/5 hover:bg-white/[0.08] hover:text-white'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+            <button 
+              onClick={onLock}
+              className="flex items-center justify-center gap-3 p-4 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-white transition-all group"
+            >
+              <Lock size={18} className="text-primary transition-transform group-hover:-rotate-12" />
+              <span className="text-sm font-bold uppercase tracking-wider">Blocca Vault Ora</span>
+            </button>
+            <button 
+              onClick={() => setShowBioResetConfirm(true)}
+              className={`flex items-center gap-4 p-4 rounded-xl border transition-all group relative ${
+                bioStatus === 'active' 
+                  ? 'bg-emerald-500/5 hover:bg-emerald-500/10 border-emerald-500/20' 
+                  : bioStatus === 'available' 
+                    ? 'bg-amber-500/5 hover:bg-amber-500/10 border-amber-500/20' 
+                    : 'bg-white/5 hover:bg-white/10 border-white/10'
+              }`}
+            >
+              <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${
+                bioStatus === 'active' ? 'bg-emerald-500/15' :
+                bioStatus === 'available' ? 'bg-amber-500/15' : 'bg-white/5'
+              }`}>
+                <Fingerprint size={20} className={
+                  bioStatus === 'active' ? 'text-emerald-400' :
+                  bioStatus === 'available' ? 'text-amber-400' :
+                  bioStatus === 'unavailable' ? 'text-text-dim' : 'text-text-dim animate-pulse'
+                } />
+              </div>
+              <div className="flex flex-col items-start">
+                <span className="text-sm font-bold text-white">Biometria</span>
+                <span className={`text-[10px] font-bold uppercase tracking-wider ${
+                  bioStatus === 'active' ? 'text-emerald-400' :
+                  bioStatus === 'available' ? 'text-amber-400' :
+                  bioStatus === 'unavailable' ? 'text-text-dim' : 'text-text-dim'
+                }`}>
+                  {bioStatus === 'active' && '✓ Attiva — Face ID / Touch ID'}
+                  {bioStatus === 'available' && '○ Non configurata'}
+                  {bioStatus === 'unavailable' && '✕ Non disponibile'}
+                  {bioStatus === 'checking' && 'Verifica…'}
+                </span>
+              </div>
+            </button>
+          </div>
+        </section>
+
+        {/* Sezione Dati */}
+        <section className="glass-card p-6 space-y-6">
+          <div className="flex items-center gap-3 border-b border-white/5 pb-4 mb-4">
+            <HardDrive className="text-primary" size={20} />
+            <h2 className="text-lg font-bold text-white">Gestione Dati</h2>
+          </div>
+
+          {/* Banner sistema chiuso */}
+          <div className="flex items-start gap-3 p-4 rounded-xl bg-white/[0.03] border border-white/10">
+            <ArrowLeftRight size={16} className="text-primary mt-0.5 shrink-0" />
+            <div className="space-y-1">
+              <p className="text-xs font-semibold text-primary uppercase tracking-wider">Sistema Chiuso — Vault Indipendenti</p>
+              <p className="text-xs text-text-muted leading-relaxed">
+                Il vault su <span className="text-white font-medium inline-flex items-center gap-1"><Monitor size={11} /> desktop</span>{' '}e
+                su <span className="text-white font-medium inline-flex items-center gap-1"><Smartphone size={11} /> Android</span>{' '}sono{' '}
+                cifrati con chiavi distinte, legate al singolo dispositivo. Non condividono dati in automatico.
+                <br />
+                Per portare i dati da un dispositivo all'altro: <span className="text-primary font-semibold">Esporta</span> sul dispositivo sorgente,
+                poi <span className="text-primary font-semibold">Importa</span> su quello di destinazione con la stessa password di backup.
+              </p>
+            </div>
+          </div>
+
+          {/* Export */}
+          <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <Download size={15} className="text-primary" />
+                <span className="font-medium text-white">Esporta Backup</span>
+              </div>
+              <p className="text-xs text-text-muted max-w-lg">
+                Salva fascicoli e agenda in un file <code className="text-primary">.lex</code> cifrato con una password a tua scelta.
+                Usalo per trasferire i dati su un altro dispositivo o per un backup sicuro.
+              </p>
+            </div>
+            <button 
+              onClick={() => setShowExportModal(true)}
+              className="btn-primary px-6 py-2.5 text-sm flex items-center gap-2 shrink-0"
+            >
+              <Download size={16} />
+              Esporta .lex
+            </button>
+          </div>
+
+          <div className="border-t border-white/5" />
+
+          {/* Import */}
+          <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <Upload size={15} className="text-primary" />
+                <span className="font-medium text-white">Importa Backup</span>
+              </div>
+              <p className="text-xs text-text-muted max-w-lg">
+                Ripristina un file <code className="text-primary">.lex</code> esportato in precedenza.
+                {' '}<span className="text-text-muted font-medium">Attenzione: sovrascrive i dati attuali.</span>
+              </p>
+            </div>
+            <button 
+              onClick={() => setShowImportModal(true)}
+              className="btn-primary px-6 py-2.5 text-sm flex items-center gap-2 shrink-0"
+            >
+              <Upload size={16} />
+              Importa .lex
+            </button>
+          </div>
+        </section>
+      </div>
+
+      {/* License information card inserted at the end of settings */}
+      <LicenseSettings />
+
+      <div className="pt-12 text-center">
+        <button 
+          onClick={() => setShowFactoryReset(true)}
+          className="text-[10px] font-black text-red-400/50 hover:text-red-500 uppercase tracking-[4px] transition-all flex items-center justify-center gap-3 mx-auto py-4 border border-red-500/10 hover:border-red-500/20 rounded-full px-8 hover:bg-red-500/5"
+        >
+          <LogOut size={14} />
+          Factory Reset Vault
+        </button>
+      </div>
+
+      {/* Factory Reset Modal */}
+      {showFactoryReset && <FactoryResetModal onClose={() => setShowFactoryReset(false)} />}
+
+      {/* Export Modal */}
+      {showExportModal && <ExportBackupModal onClose={() => setShowExportModal(false)} />}
+
+      {/* Import Modal */}
+      {showImportModal && <ImportBackupModal onClose={() => setShowImportModal(false)} />}
+
+      {/* Biometrics Reset Confirm Modal */}
+      {showBioResetConfirm && <BioResetConfirmModal onClose={() => { setShowBioResetConfirm(false); refreshBioStatus(); }} />}
+    </div>
+  );
+}
+
+SettingsPage.propTypes = {
+  onLock: PropTypes.func,
+};

@@ -2,3 +2,4 @@ src-tauri/target/
 src-tauri/gen/
 src-tauri/src/lib.rs.bak
 *.bak
+.metadata_never_index
