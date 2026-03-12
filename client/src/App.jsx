@@ -76,9 +76,9 @@ export default function App() {
       if (s) {
         setSettings(s);
         if (typeof s.privacyBlurEnabled === 'boolean') setPrivacyEnabled(s.privacyBlurEnabled);
-        if (typeof s.screenshotProtection === 'boolean') {
-          api.setContentProtection?.(s.screenshotProtection);
-        }
+        // Apply screenshot protection — default to true on first launch
+        const screenshotProt = typeof s.screenshotProtection === 'boolean' ? s.screenshotProtection : true;
+        api.setContentProtection?.(screenshotProt);
         if (s.autolockMinutes !== undefined) {
           api.setAutolockMinutes?.(s.autolockMinutes);
         }
@@ -368,7 +368,7 @@ export default function App() {
           <WindowControls />
           <Toaster
             position="bottom-right"
-            containerStyle={{ bottom: 24, right: 24 }}
+            containerStyle={{ bottom: 24, right: 24, zIndex: 99999 }}
             gutter={10}
             toastOptions={{
               className: 'lexflow-toast',
@@ -436,6 +436,7 @@ export default function App() {
                       const newList = practices.map(p => p.id === up.id ? up : p);
                       savePractices(newList);
                     }}
+                    agendaEvents={agendaEvents}
                   />
                 ) : (
                   <PracticesList

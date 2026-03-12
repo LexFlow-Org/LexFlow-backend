@@ -18,7 +18,8 @@ import {
   Eye,
   EyeOff,
   X,
-  Fingerprint
+  Fingerprint,
+  ShieldCheck
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import LicenseSettings from '../components/LicenseSettings';
@@ -300,74 +301,46 @@ function ImportBackupModal({ onClose }) {
 
 ImportBackupModal.propTypes = { onClose: PropTypes.func.isRequired };
 
-/* ── Biometric Reset Confirm Modal ── */
-function BioResetConfirmModal({ onClose }) {
-  // step: 'verify' → 'confirm' → 'done' → 're-enroll'
-  const [step, setStep] = useState('verify');
+/* ── Biometric Configuration / Deactivation Modal ── */
+function BioResetConfirmModal({ onClose, bioStatus, refreshBioStatus }) {
+  // If bio is active → flow: confirm-deactivate → done-deactivated
+  // If bio is available (not configured) → flow: enroll (ask password → saveBio → done)
+  const isActive = bioStatus === 'active';
+  const [step, setStep] = useState(isActive ? 'confirm-deactivate' : 'enroll');
   const [pwd, setPwd] = useState('');
   const [showPwd, setShowPwd] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
-  // On mount, trigger system biometric to verify identity
-  useEffect(() => {
-    if (step !== 'verify') return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const bioAvail = await api.checkBio();
-        if (!bioAvail) { if (!cancelled) setStep('confirm'); return; }
-        const result = await api.bioLogin();
-        if (cancelled) return;
-        if (result) { setStep('confirm'); }
-        else { toast.error('Autenticazione biometrica fallita'); onClose(); }
-      } catch {
-        if (!cancelled) { setStep('confirm'); } // fallback to confirm if bio fails
-      }
-    })();
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- only on mount
-  }, []);
-
-  const doReset = async () => {
+  // Deactivate biometrics
+  const doDeactivate = async () => {
     setLoading(true);
     try {
       await api.clearBio();
-      toast.success("Biometria resettata");
-      setStep('done');
+      setStep('done-deactivated');
     } catch {
-      toast.error("Errore nel reset biometria");
+      toast.error("Errore nella disattivazione biometria");
     }
     setLoading(false);
   };
 
-  const doReEnroll = async () => {
+  // Enroll biometrics: verify password → saveBio (triggers native popup) → done
+  const doEnroll = async () => {
     setError('');
     if (!pwd.trim()) { setError('Inserisci la Master Password.'); return; }
     setLoading(true);
     try {
-      // Trigger system biometric first for extra security
-      try {
-        const bioAvail = await api.checkBio();
-        if (bioAvail) {
-          const bioResult = await api.bioLogin();
-          if (!bioResult) {
-            setError('Verifica biometrica fallita. Riprova.');
-            setLoading(false);
-            return;
-          }
-        }
-      } catch { /* bio unavailable — proceed with password only */ }
-      // Verify the password is correct
+      // Verify the password is correct first
       const verify = await api.verifyVaultPassword(pwd);
       if (!verify?.valid) {
         setError(verify?.error || 'Password errata.');
         setLoading(false);
         return;
       }
-      // Enroll biometrics with the password
+      // Enroll biometrics with the password (this triggers the native biometric popup)
       await api.saveBio(pwd);
-      toast.success("Biometria riconfigurata con successo!");
+      toast.success("Biometria configurata con successo!");
+      refreshBioStatus();
       onClose();
     } catch {
       setError('Errore nella configurazione biometrica.');
@@ -375,37 +348,52 @@ function BioResetConfirmModal({ onClose }) {
     setLoading(false);
   };
 
+  // Close after deactivation — refresh status
+  const handleCloseAfterDeactivate = () => {
+    toast.success("Biometria disattivata");
+    refreshBioStatus();
+    onClose();
+  };
+
+  const stepGradients = {
+    enroll: 'linear-gradient(135deg, rgba(212,169,64,0.08) 0%, rgba(212,169,64,0.02) 100%)',
+    'done-deactivated': 'linear-gradient(135deg, rgba(96,165,250,0.08) 0%, rgba(96,165,250,0.02) 100%)',
+  };
+  const defaultGradient = 'linear-gradient(135deg, rgba(239,68,68,0.08) 0%, rgba(239,68,68,0.02) 100%)';
+
+  const stepIconStyles = {
+    enroll: 'bg-primary/10 border-primary/20',
+    'done-deactivated': 'bg-blue-500/10 border-blue-500/20',
+  };
+  const defaultIconStyle = 'bg-red-500/10 border-red-500/20';
+
+  const stepIcons = {
+    enroll: <Fingerprint size={22} className="text-primary" />,
+    'done-deactivated': <ShieldCheck size={22} className="text-blue-400" />,
+  };
+  const defaultIcon = <RefreshCw size={22} className="text-red-400" />;
+
   return (
-    <ModalOverlay onClose={onClose} labelledBy="bio-reset-title" zIndex={200}>
+    <ModalOverlay onClose={onClose} labelledBy="bio-modal-title" zIndex={200}>
       <div className="bg-[#0f1016] border border-white/10 rounded-[32px] max-w-md w-full shadow-2xl overflow-hidden">
-        <div className="px-8 pt-8 pb-5" style={{ background: step === 're-enroll' 
-          ? 'linear-gradient(135deg, rgba(212,169,64,0.08) 0%, rgba(212,169,64,0.02) 100%)'
-          : step === 'verify'
-            ? 'linear-gradient(135deg, rgba(96,165,250,0.08) 0%, rgba(96,165,250,0.02) 100%)'
-            : 'linear-gradient(135deg, rgba(239,68,68,0.08) 0%, rgba(239,68,68,0.02) 100%)' }}>
+        <div className="px-8 pt-8 pb-5" style={{ background: stepGradients[step] || defaultGradient }}>
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-4">
             <div className={`w-12 h-12 rounded-2xl flex items-center justify-center border ${
-              step === 'verify' ? 'bg-blue-500/10 border-blue-500/20' :
-              step === 're-enroll' ? 'bg-primary/10 border-primary/20' : 'bg-red-500/10 border-red-500/20'
+              stepIconStyles[step] || defaultIconStyle
             }`}>
-              {step === 'verify' 
-                ? <Fingerprint size={22} className="text-blue-400 animate-pulse" />
-                : <RefreshCw size={22} className={step === 're-enroll' ? 'text-primary' : 'text-red-400'} />
-              }
+              {stepIcons[step] || defaultIcon}
             </div>
             <div>
-              <h3 id="bio-reset-title" className="text-xl font-bold text-white">
-                {step === 'verify' && 'Verifica Identità'}
-                {step === 'confirm' && 'Resetta Biometria'}
-                {step === 'done' && 'Biometria Resettata'}
-                {step === 're-enroll' && 'Riconfigura Biometria'}
+              <h3 id="bio-modal-title" className="text-xl font-bold text-white">
+                {step === 'confirm-deactivate' && 'Disattiva Biometria'}
+                {step === 'done-deactivated' && 'Biometria Disattivata'}
+                {step === 'enroll' && 'Configura Biometria'}
               </h3>
               <p className="text-xs text-text-dim mt-0.5">
-                {step === 'verify' && 'Conferma con biometria del dispositivo…'}
-                {step === 'confirm' && 'Identità verificata'}
-                {step === 'done' && 'Vuoi riconfigurare subito?'}
-                {step === 're-enroll' && 'Password + biometria del dispositivo'}
+                {step === 'confirm-deactivate' && 'Rimuovi l\'accesso biometrico'}
+                {step === 'done-deactivated' && 'Accesso biometrico rimosso'}
+                {step === 'enroll' && 'Password + biometria del dispositivo'}
               </p>
             </div>
           </div>
@@ -415,58 +403,47 @@ function BioResetConfirmModal({ onClose }) {
         </div>
       </div>
 
-      {/* Step: Verifying identity */}
-      {step === 'verify' && (
-        <div className="px-8 py-10 flex flex-col items-center gap-4">
-          <div className="w-16 h-16 rounded-2xl bg-blue-500/10 flex items-center justify-center border border-blue-500/20 animate-pulse">
-            <Fingerprint size={32} className="text-blue-400" />
-          </div>
-          <p className="text-text-muted text-xs text-center">Conferma la tua identità con Touch ID / Face ID…</p>
-        </div>
-      )}
-
-      {/* Step: Confirm reset */}
-      {step === 'confirm' && (
+      {/* Step: Confirm deactivation */}
+      {step === 'confirm-deactivate' && (
         <>
           <div className="px-8 py-6">
             <p className="text-text-muted text-xs leading-relaxed">
-              Cancellare le credenziali biometriche salvate? Dovrai reinserire la password e potrai riconfigurare la biometria.
+              Vuoi disattivare l'accesso biometrico? Dovrai usare la Master Password per accedere ai fascicoli protetti. Potrai riattivare la biometria in qualsiasi momento.
             </p>
           </div>
           <div className="flex justify-end gap-3 px-8 py-5 bg-[#14151d] border-t border-white/5">
             <button onClick={onClose} className="px-6 py-3 rounded-2xl text-text-dim hover:text-white hover:bg-white/5 transition-all text-xs font-bold uppercase tracking-widest">Annulla</button>
-            <button onClick={doReset} disabled={loading}
+            <button onClick={doDeactivate} disabled={loading}
               className={`px-6 py-3 rounded-2xl bg-red-500/10 border border-red-500/20 text-red-400 hover:bg-red-500/20 transition-all text-xs font-bold uppercase tracking-widest ${loading ? 'opacity-50' : ''}`}>
-              {loading ? 'Reset...' : 'Conferma'}
+              {loading ? 'Disattivazione...' : 'Disattiva'}
             </button>
           </div>
         </>
       )}
 
-      {/* Step: Done — offer re-enrollment */}
-      {step === 'done' && (
+      {/* Step: Done deactivated */}
+      {step === 'done-deactivated' && (
         <>
           <div className="px-8 py-6">
             <p className="text-text-muted text-xs leading-relaxed">
-              Le credenziali biometriche sono state cancellate. Vuoi riconfigurare subito l'accesso biometrico (Face ID / Touch ID)?
+              L'accesso biometrico è stato disattivato. Potrai riattivarlo in qualsiasi momento dalle Impostazioni.
             </p>
           </div>
           <div className="flex justify-end gap-3 px-8 py-5 bg-[#14151d] border-t border-white/5">
-            <button onClick={onClose} className="px-6 py-3 rounded-2xl text-text-dim hover:text-white hover:bg-white/5 transition-all text-xs font-bold uppercase tracking-widest">No, chiudi</button>
-            <button onClick={() => setStep('re-enroll')}
+            <button onClick={handleCloseAfterDeactivate}
               className="btn-primary px-6 py-3 text-xs font-bold uppercase tracking-widest">
-              Riconfigura
+              Chiudi
             </button>
           </div>
         </>
       )}
 
-      {/* Step: Re-enroll — ask for password */}
-      {step === 're-enroll' && (
+      {/* Step: Enroll — ask for password, then saveBio triggers native popup */}
+      {step === 'enroll' && (
         <>
           <div className="px-8 py-6 space-y-4">
             <p className="text-text-muted text-xs leading-relaxed">
-              Inserisci la tua Master Password per configurare l'accesso biometrico.
+              Inserisci la tua Master Password per configurare l'accesso biometrico. Dopo la verifica, il sistema ti chiederà di confermare con Face ID / Touch ID.
             </p>
             <div className="relative">
               <KeyRound size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-dim" />
@@ -476,7 +453,7 @@ function BioResetConfirmModal({ onClose }) {
                 value={pwd}
                 onChange={e => { setPwd(e.target.value); setError(''); }}
                 autoFocus
-                onKeyDown={e => { if (e.key === 'Enter') doReEnroll(); }} />
+                onKeyDown={e => { if (e.key === 'Enter') doEnroll(); }} />
               <button type="button" onClick={() => setShowPwd(v => !v)}
                 className="absolute right-3 top-1/2 -translate-y-1/2 text-text-dim hover:text-white transition-colors">
                 {showPwd ? <EyeOff size={16} /> : <Eye size={16} />}
@@ -486,9 +463,9 @@ function BioResetConfirmModal({ onClose }) {
           </div>
           <div className="flex justify-end gap-3 px-8 py-5 bg-[#14151d] border-t border-white/5">
             <button onClick={onClose} className="px-6 py-3 rounded-2xl text-text-dim hover:text-white hover:bg-white/5 transition-all text-xs font-bold uppercase tracking-widest">Annulla</button>
-            <button onClick={doReEnroll} disabled={loading}
+            <button onClick={doEnroll} disabled={loading}
               className={`btn-primary px-6 py-3 text-xs font-bold uppercase tracking-widest ${loading ? 'opacity-50' : ''}`}>
-              {loading ? 'Configurazione...' : 'Salva Biometria'}
+              {loading ? 'Configurazione...' : 'Configura Biometria'}
             </button>
           </div>
         </>
@@ -498,7 +475,7 @@ function BioResetConfirmModal({ onClose }) {
   );
 }
 
-BioResetConfirmModal.propTypes = { onClose: PropTypes.func.isRequired };
+BioResetConfirmModal.propTypes = { onClose: PropTypes.func.isRequired, bioStatus: PropTypes.string, refreshBioStatus: PropTypes.func };
 
 export default function SettingsPage({ onLock }) {
   const [privacyEnabled, setPrivacyEnabled] = useState(true);
@@ -532,25 +509,36 @@ export default function SettingsPage({ onLock }) {
 
   const applySettings = (settings) => {
     if (!settings) return;
-    if (typeof settings.privacyBlurEnabled === 'boolean') setPrivacyEnabled(settings.privacyBlurEnabled);
-    if (typeof settings.notifyEnabled === 'boolean') setNotifyEnabled(settings.notifyEnabled);
-    if (settings.notificationTime) setNotificationTime(settings.notificationTime);
-    if (typeof settings.screenshotProtection === 'boolean') setScreenshotProtection(settings.screenshotProtection);
+    const boolFields = [
+      ['privacyBlurEnabled', setPrivacyEnabled],
+      ['notifyEnabled', setNotifyEnabled],
+      ['screenshotProtection', setScreenshotProtection],
+    ];
+    for (const [key, setter] of boolFields) {
+      if (typeof settings[key] === 'boolean') setter(settings[key]);
+    }
+    // Unify: prefer `preavviso` (Agenda key), fallback to `notificationTime` (legacy Settings key)
+    const time = settings.preavviso ?? settings.notificationTime;
+    if (time !== undefined) setNotificationTime(time);
     if (settings.autolockMinutes !== undefined) setAutolockMinutes(settings.autolockMinutes);
+  };
+
+  const initPlatform = async () => {
+    try {
+      const p = await api.getPlatform();
+      const labels = { macos: 'macOS', windows: 'Windows', android: 'Android', ios: 'iOS', linux: 'Linux' };
+      setPlatform(labels[p] || p || 'Desktop');
+    } catch {
+      const m = await api.isMac();
+      setPlatform(m ? 'macOS' : 'Windows');
+    }
   };
 
   useEffect(() => {
     api.getAppVersion().then(setAppVersion);
-    api.getPlatform().then(p => {
-      const labels = { macos: 'macOS', windows: 'Windows', android: 'Android', ios: 'iOS', linux: 'Linux' };
-      setPlatform(labels[p] || p || 'Desktop');
-    }).catch(() => api.isMac().then(m => setPlatform(m ? 'macOS' : 'Windows')));
+    initPlatform();
     api.getSettings().then(applySettings);
-    // Check biometrics status
-    api.checkBio().then(available => {
-      if (!available) { setBioStatus('unavailable'); return; }
-      api.hasBioSaved().then(saved => setBioStatus(saved ? 'active' : 'available'));
-    }).catch(() => setBioStatus('unavailable'));
+    refreshBioStatus();
     // Listen for corrupted settings file event from backend
     const unsubscribe = api.onSettingsCorrupted?.((payload) => {
       toast.error(
@@ -565,6 +553,7 @@ export default function SettingsPage({ onLock }) {
     privacyBlurEnabled: privacyEnabled,
     notifyEnabled,
     notificationTime,
+    preavviso: notificationTime, // keep synced with Agenda's key
     screenshotProtection,
     autolockMinutes,
   }), [privacyEnabled, notifyEnabled, notificationTime, screenshotProtection, autolockMinutes]);
@@ -578,6 +567,30 @@ export default function SettingsPage({ onLock }) {
     } catch {
       toast.error('Errore salvataggio');
       setPrivacyEnabled(!newValue); 
+    }
+  };
+
+  const handleScreenshotToggle = async () => {
+    const val = !screenshotProtection;
+    setScreenshotProtection(val);
+    try {
+      await api.setContentProtection(val);
+      await api.saveSettings({ ...buildFullSettings(), screenshotProtection: val });
+      toast.success(val ? 'Screenshot bloccati' : 'Screenshot sbloccati');
+    } catch {
+      toast.error('Errore');
+      setScreenshotProtection(!val);
+    }
+  };
+
+  const handleAutolockChange = async (opt) => {
+    setAutolockMinutes(opt.value);
+    try {
+      await api.setAutolockMinutes(opt.value);
+      await api.saveSettings({ ...buildFullSettings(), autolockMinutes: opt.value });
+      toast.success(opt.value === 0 ? 'Blocco automatico disabilitato' : `Blocco dopo ${opt.label} di inattività`);
+    } catch {
+      toast.error('Errore');
     }
   };
 
@@ -643,7 +656,7 @@ export default function SettingsPage({ onLock }) {
                       type="button"
                       onClick={() => {
                         setNotificationTime(opt.value);
-                        saveNotifySettings({ notificationTime: opt.value });
+                        saveNotifySettings({ notificationTime: opt.value, preavviso: opt.value });
                       }}
                       className={`px-4 py-2 rounded-xl text-xs font-semibold transition-all border ${
                         notificationTime === opt.value
@@ -698,18 +711,7 @@ export default function SettingsPage({ onLock }) {
               </p>
             </div>
             <button 
-              onClick={async () => {
-                const val = !screenshotProtection;
-                setScreenshotProtection(val);
-                try {
-                  await api.setContentProtection(val);
-                  await api.saveSettings({ ...buildFullSettings(), screenshotProtection: val });
-                  toast.success(val ? 'Blocco Screenshot Attivato' : 'Blocco Screenshot Disattivato');
-                } catch {
-                  toast.error('Errore');
-                  setScreenshotProtection(!val);
-                }
-              }}
+              onClick={handleScreenshotToggle}
               className={`w-12 h-6 rounded-full transition-colors relative ${screenshotProtection ? 'bg-primary' : 'bg-white/10'}`}
             >
               <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform duration-200 ${screenshotProtection ? 'left-7' : 'left-1'}`} />
@@ -730,16 +732,7 @@ export default function SettingsPage({ onLock }) {
                 <button
                   key={opt.value}
                   type="button"
-                  onClick={async () => {
-                    setAutolockMinutes(opt.value);
-                    try {
-                      await api.setAutolockMinutes(opt.value);
-                      await api.saveSettings({ ...buildFullSettings(), autolockMinutes: opt.value });
-                      toast.success(opt.value === 0 ? 'Blocco automatico disabilitato' : `Blocco dopo ${opt.label} di inattività`);
-                    } catch {
-                      toast.error('Errore');
-                    }
-                  }}
+                  onClick={() => handleAutolockChange(opt)}
                   className={`px-4 py-2 rounded-xl text-xs font-semibold transition-all border ${
                     autolockMinutes === opt.value
                       ? 'bg-primary text-black border-primary shadow-[0_0_12px_rgba(212,169,64,0.3)]'
@@ -763,29 +756,31 @@ export default function SettingsPage({ onLock }) {
             <button 
               onClick={() => setShowBioResetConfirm(true)}
               className={`flex items-center gap-4 p-4 rounded-xl border transition-all group relative ${
-                bioStatus === 'active' 
-                  ? 'bg-emerald-500/5 hover:bg-emerald-500/10 border-emerald-500/20' 
-                  : bioStatus === 'available' 
-                    ? 'bg-amber-500/5 hover:bg-amber-500/10 border-amber-500/20' 
-                    : 'bg-white/5 hover:bg-white/10 border-white/10'
+                {
+                  active: 'bg-emerald-500/5 hover:bg-emerald-500/10 border-emerald-500/20',
+                  available: 'bg-amber-500/5 hover:bg-amber-500/10 border-amber-500/20',
+                }[bioStatus] || 'bg-white/5 hover:bg-white/10 border-white/10'
               }`}
             >
               <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${
-                bioStatus === 'active' ? 'bg-emerald-500/15' :
-                bioStatus === 'available' ? 'bg-amber-500/15' : 'bg-white/5'
+                { active: 'bg-emerald-500/15', available: 'bg-amber-500/15' }[bioStatus] || 'bg-white/5'
               }`}>
                 <Fingerprint size={20} className={
-                  bioStatus === 'active' ? 'text-emerald-400' :
-                  bioStatus === 'available' ? 'text-amber-400' :
-                  bioStatus === 'unavailable' ? 'text-text-dim' : 'text-text-dim animate-pulse'
+                  {
+                    active: 'text-emerald-400',
+                    available: 'text-amber-400',
+                    checking: 'text-text-dim animate-pulse',
+                  }[bioStatus] || 'text-text-dim'
                 } />
               </div>
               <div className="flex flex-col items-start">
                 <span className="text-sm font-bold text-white">Biometria</span>
                 <span className={`text-[10px] font-bold uppercase tracking-wider ${
-                  bioStatus === 'active' ? 'text-emerald-400' :
-                  bioStatus === 'available' ? 'text-amber-400' :
-                  bioStatus === 'unavailable' ? 'text-text-dim' : 'text-text-dim'
+                  {
+                    active: 'text-emerald-400',
+                    available: 'text-amber-400',
+                    checking: 'text-text-dim animate-pulse',
+                  }[bioStatus] || 'text-text-dim'
                 }`}>
                   {bioStatus === 'active' && '✓ Attiva — Face ID / Touch ID'}
                   {bioStatus === 'available' && '○ Non configurata'}
@@ -872,10 +867,10 @@ export default function SettingsPage({ onLock }) {
       <div className="pt-12 text-center">
         <button 
           onClick={() => setShowFactoryReset(true)}
-          className="text-[10px] font-black text-red-400/50 hover:text-red-500 uppercase tracking-[4px] transition-all flex items-center justify-center gap-3 mx-auto py-4 border border-red-500/10 hover:border-red-500/20 rounded-full px-8 hover:bg-red-500/5"
+          className="w-full max-w-xs mx-auto flex items-center justify-center gap-3 px-6 py-3 rounded-2xl text-red-500 bg-red-500/10 border border-red-500/20 hover:bg-red-500/20 transition-all duration-300 group"
         >
-          <LogOut size={14} />
-          Factory Reset Vault
+          <LogOut size={16} className="transition-transform group-hover:-rotate-12" />
+          <span className="font-black text-[11px] uppercase tracking-widest">Factory Reset Vault</span>
         </button>
       </div>
 
@@ -889,7 +884,7 @@ export default function SettingsPage({ onLock }) {
       {showImportModal && <ImportBackupModal onClose={() => setShowImportModal(false)} />}
 
       {/* Biometrics Reset Confirm Modal */}
-      {showBioResetConfirm && <BioResetConfirmModal onClose={() => { setShowBioResetConfirm(false); refreshBioStatus(); }} />}
+      {showBioResetConfirm && <BioResetConfirmModal onClose={() => { setShowBioResetConfirm(false); refreshBioStatus(); }} bioStatus={bioStatus} refreshBioStatus={refreshBioStatus} />}
     </div>
   );
 }
