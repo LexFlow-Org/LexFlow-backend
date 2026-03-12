@@ -167,6 +167,6 @@ jobs:
           name: clippy-sonar-report
 
       - name: SonarCloud Scan
-        uses: SonarSource/sonarqube-scan-action@0303d6b62e310685c4fe437d40acfb2f2a5c5192 # v6
+        uses: SonarSource/sonarqube-scan-action@fd88b7d7ccbaefd23d8f36f73b59db7a3d246602 # v6
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
